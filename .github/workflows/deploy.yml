@@ -98,6 +98,26 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Wait for SSM agent to register
+        env:
+          INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+        run: |
+          echo "Waiting for SSM agent on ${INSTANCE_ID} to come online..."
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "None")
+            echo "Attempt ${i}: SSM PingStatus = ${STATUS}"
+            if [ "${STATUS}" = "Online" ]; then
+              echo "SSM agent is Online — proceeding."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "ERROR: SSM agent did not come online within 7.5 minutes."
+          exit 1
+
       - name: Install Ansible and dependencies
         run: |
           python -m pip install --upgrade pip
@@ -116,6 +136,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
           INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
           # Derive bucket name from the deterministic naming convention used in
           # terraform/main.tf ("${project_name}-ssm-tf") to avoid the GitHub

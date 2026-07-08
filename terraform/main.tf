@@ -298,6 +298,19 @@ resource "aws_instance" "app" {
   iam_instance_profile   = aws_iam_instance_profile.ssm.name
   key_name               = aws_key_pair.app.key_name
 
+  # Ubuntu 24.04 does not ship with the SSM agent pre-installed.
+  # Install it via snap so that AWS Systems Manager can connect
+  # (used by the Ansible community.aws.aws_ssm connection plugin).
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    snap install amazon-ssm-agent --classic
+    snap start amazon-ssm-agent
+    systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+  EOF
+
+  user_data_replace_on_change = true
+
   tags = {
     Name    = "${var.project_name}-app"
     Project = var.project_name
