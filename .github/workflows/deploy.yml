@@ -146,15 +146,19 @@ jobs:
         run: |
           # Pass the instance ID as an inline inventory entry ("-i ID,") so
           # Ansible can resolve it as a host. The YAML inventory supplies the
-          # SSM connection group-vars for app_servers; we also pass connection
-          # vars as extra-vars for safety.
+          # SSM connection group-vars for app_servers.
+          # NOTE: ansible_connection must NOT be passed as an extra-var (-e)
+          # because extra-vars have the highest Ansible precedence and would
+          # override the 'ansible_connection: local' set on delegate_to:localhost
+          # tasks, causing them to fail with "Invalid instance id: localhost".
+          # Instead, ansible_connection is set as a play-level var in the
+          # playbook so that task-level overrides for delegated tasks still work.
           ansible-playbook ansible/playbook.yml \
             -i "${INSTANCE_ID}," \
             -i ansible/inventory.yml \
             -e "target_instance_id=${INSTANCE_ID}" \
             -e "ansible_aws_ssm_bucket_name=${SSM_BUCKET}" \
             -e "ansible_aws_ssm_region=${{ secrets.AWS_REGION }}" \
-            -e "ansible_connection=community.aws.aws_ssm" \
             -e "aws_region=${{ secrets.AWS_REGION }}"
 
   verify:

@@ -10,6 +10,7 @@
     app_user: ubuntu
     app_port: 8000
     ansible_remote_tmp: /tmp/.ansible.tmp
+    ansible_connection: community.aws.aws_ssm
 
   tasks:
     - name: Wait for system to be ready
