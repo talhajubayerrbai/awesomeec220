@@ -62,6 +62,8 @@
       register: public_dir_stat
       delegate_to: localhost
       become: false
+      vars:
+        ansible_connection: local
 
     - name: Copy public directory if it exists
       ansible.builtin.copy:
@@ -79,6 +81,8 @@
       register: req_stat
       delegate_to: localhost
       become: false
+      vars:
+        ansible_connection: local
 
     - name: Copy requirements.txt to app dir
       ansible.builtin.copy:
