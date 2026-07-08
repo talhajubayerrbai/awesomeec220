@@ -1,246 +1,164 @@
 ---
-- name: Configure Python FastAPI application
-  hosts: all
+- name: Configure application server
+  hosts: app
   become: true
+  gather_facts: true
 
   vars:
     app_dir: /opt/app
     venv_dir: /opt/app/.venv
     app_user: ubuntu
-    app_port: 8000
+    app_group: ubuntu
     ansible_remote_tmp: /tmp/.ansible.tmp
-    ansible_python_interpreter: /usr/bin/python3
 
   tasks:
-    # -------------------------------------------------------------------------
-    # System packages
-    # -------------------------------------------------------------------------
+    #  System packages 
+
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Install Python 3.12 and system dependencies
+    - name: Install system packages
       ansible.builtin.apt:
         name:
           - python3.12
           - python3.12-venv
           - python3.12-dev
           - python3-pip
-          - build-essential
+          - nginx
           - curl
           - git
-          - nginx
         state: present
 
-    # -------------------------------------------------------------------------
-    # Application directory
-    # -------------------------------------------------------------------------
+    #  Application directory 
+
     - name: Create application directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
         state: directory
-        owner: root
-        group: root
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
         mode: "0755"
 
-    # -------------------------------------------------------------------------
-    # Copy application files (using playbook_dir to resolve paths correctly)
-    # -------------------------------------------------------------------------
+    #  Sync application code 
+    # Each file/directory is copied individually using playbook_dir/../ paths
+    # to resolve from repo root (not ansible/files/).
+
+    - name: Check if app package directory exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../app"
+      register: app_pkg_stat
+      delegate_to: localhost
+      become: false
+
+    - name: Copy app package
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/"
+        dest: "{{ app_dir }}/app/"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+      when: app_pkg_stat.stat.exists
+
+    - name: Check if main.py exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../main.py"
+      register: main_py_stat
+      delegate_to: localhost
+      become: false
+
     - name: Copy main.py
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../main.py"
         dest: "{{ app_dir }}/main.py"
-        owner: root
-        group: root
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
         mode: "0644"
+      when: main_py_stat.stat.exists
 
-    - name: Create app package directory
-      ansible.builtin.file:
-        path: "{{ app_dir }}/app"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+    - name: Check if requirements.txt exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../requirements.txt"
+      register: req_stat
+      delegate_to: localhost
+      become: false
 
-    - name: Copy app/__init__.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/__init__.py"
-        dest: "{{ app_dir }}/app/__init__.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Copy app/main.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/main.py"
-        dest: "{{ app_dir }}/app/main.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Copy app/config.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/config.py"
-        dest: "{{ app_dir }}/app/config.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Create app/routers directory
-      ansible.builtin.file:
-        path: "{{ app_dir }}/app/routers"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Copy app/routers/__init__.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/routers/__init__.py"
-        dest: "{{ app_dir }}/app/routers/__init__.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Copy app/routers/health.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/routers/health.py"
-        dest: "{{ app_dir }}/app/routers/health.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Copy app/routers/api.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/routers/api.py"
-        dest: "{{ app_dir }}/app/routers/api.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Create app/models directory
-      ansible.builtin.file:
-        path: "{{ app_dir }}/app/models"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Copy app/models/__init__.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/models/__init__.py"
-        dest: "{{ app_dir }}/app/models/__init__.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Create app/schemas directory
-      ansible.builtin.file:
-        path: "{{ app_dir }}/app/schemas"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Copy app/schemas/__init__.py
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../app/schemas/__init__.py"
-        dest: "{{ app_dir }}/app/schemas/__init__.py"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Check if public/ directory exists locally
-      ansible.builtin.set_fact:
-        public_dir_files: "{{ lookup('fileglob', playbook_dir + '/../public/*', wantlist=True) }}"
-
-    - name: Create public/ directory on remote if source exists
-      ansible.builtin.file:
-        path: "{{ app_dir }}/public"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      when: public_dir_files | length > 0
-
-    - name: Copy public/ directory contents
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../public/"
-        dest: "{{ app_dir }}/public/"
-        owner: root
-        group: root
-        mode: "0644"
-      when: public_dir_files | length > 0
-
-    # -------------------------------------------------------------------------
-    # requirements.txt - copy if present, otherwise create minimal one
-    # -------------------------------------------------------------------------
-    - name: Check if requirements.txt exists locally
-      ansible.builtin.set_fact:
-        req_files: "{{ lookup('fileglob', playbook_dir + '/../requirements.txt', wantlist=True) }}"
-
-    - name: Copy requirements.txt if present
+    - name: Copy requirements.txt
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../requirements.txt"
         dest: "{{ app_dir }}/requirements.txt"
-        owner: root
-        group: root
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
         mode: "0644"
-      when: req_files | length > 0
+      when: req_stat.stat.exists
 
-    - name: Write minimal requirements.txt if not present
-      ansible.builtin.shell: |
-        cat > {{ app_dir }}/requirements.txt << 'EOF'
-        fastapi>=0.110.0
-        uvicorn[standard]>=0.29.0
-        gunicorn>=21.2.0
-        python-multipart>=0.0.9
-        aiofiles>=23.0.0
-        EOF
-      args:
-        creates: "{{ app_dir }}/requirements.txt"
-      when: req_files | length == 0
+    - name: Check if public/ directory exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../public"
+      register: public_stat
+      delegate_to: localhost
+      become: false
 
-    # -------------------------------------------------------------------------
-    # Python virtual environment (created as root, ownership fixed after)
-    # -------------------------------------------------------------------------
-    - name: Create Python virtual environment using python3.12
+    - name: Copy public/ directory
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../public/"
+        dest: "{{ app_dir }}/public/"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+      when: public_stat.stat.exists
+
+    #  Python virtual environment 
+
+    - name: Create Python 3.12 virtual environment
       ansible.builtin.command:
         cmd: python3.12 -m venv "{{ venv_dir }}"
-        creates: "{{ venv_dir }}/bin/python"
+        creates: "{{ venv_dir }}/bin/activate"
 
-    - name: Upgrade pip inside venv
+    - name: Set venv ownership to ubuntu
+      ansible.builtin.file:
+        path: "{{ venv_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        recurse: true
+
+    - name: Upgrade pip in venv
       ansible.builtin.command:
         cmd: "{{ venv_dir }}/bin/pip install --upgrade pip"
 
-    - name: Install Python requirements
+    - name: Install base Python dependencies
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/pip install fastapi uvicorn[standard] gunicorn"
+
+    - name: Install requirements.txt if present
       ansible.builtin.command:
         cmd: "{{ venv_dir }}/bin/pip install -r {{ app_dir }}/requirements.txt"
+      when: req_stat.stat.exists
 
-    - name: Set ownership of app directory to ubuntu
-      ansible.builtin.file:
-        path: "{{ app_dir }}"
-        owner: "{{ app_user }}"
-        group: "{{ app_user }}"
-        recurse: true
+    #  Environment file 
 
-    # -------------------------------------------------------------------------
-    # Environment file
-    # -------------------------------------------------------------------------
-    - name: Write environment file
+    - name: Write .env file
       ansible.builtin.shell: |
-        cat > /etc/app.env << 'EOF'
+        cat > {{ app_dir }}/.env << 'ENVEOF'
         APP_ENV=production
         PORT=8000
         HOST=0.0.0.0
-        EOF
-        chmod 644 /etc/app.env
+        ENVEOF
+      args:
+        executable: /bin/bash
 
-    # -------------------------------------------------------------------------
-    # Systemd service
-    # -------------------------------------------------------------------------
-    - name: Write systemd service unit
+    - name: Set .env ownership
+      ansible.builtin.file:
+        path: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0640"
+
+    #  Systemd service 
+
+    - name: Write systemd unit file for app
       ansible.builtin.copy:
         dest: /etc/systemd/system/app.service
         owner: root
@@ -248,26 +166,23 @@
         mode: "0644"
         content: |
           [Unit]
-          Description=FastAPI Application (gunicorn)
+          Description=FastAPI Application
           After=network.target
 
           [Service]
-          Type=notify
+          Type=simple
           User={{ app_user }}
-          Group={{ app_user }}
+          Group={{ app_group }}
           WorkingDirectory={{ app_dir }}
-          EnvironmentFile=/etc/app.env
+          EnvironmentFile={{ app_dir }}/.env
           ExecStart={{ venv_dir }}/bin/gunicorn app.main:app \
-              -k uvicorn.workers.UvicornWorker \
-              -w 4 \
-              -b 0.0.0.0:{{ app_port }} \
-              --timeout 120 \
-              --access-logfile - \
-              --error-logfile -
+            -k uvicorn.workers.UvicornWorker \
+            -w 4 \
+            -b 0.0.0.0:8000
           Restart=always
           RestartSec=5
-          KillMode=mixed
-          TimeoutStopSec=5
+          StandardOutput=journal
+          StandardError=journal
 
           [Install]
           WantedBy=multi-user.target
@@ -282,9 +197,8 @@
         enabled: true
         state: restarted
 
-    # -------------------------------------------------------------------------
-    # Nginx reverse proxy: port 80 -> 127.0.0.1:8000
-    # -------------------------------------------------------------------------
+    #  Nginx reverse proxy 
+
     - name: Write nginx site config
       ansible.builtin.copy:
         dest: /etc/nginx/sites-available/app
@@ -293,17 +207,17 @@
         mode: "0644"
         content: |
           server {
-              listen 80 default_server;
-              listen [::]:80 default_server;
+              listen 80;
+              server_name _;
 
               location / {
                   proxy_pass         http://127.0.0.1:8000;
-                  proxy_http_version 1.1;
-                  proxy_set_header   Host              $host;
-                  proxy_set_header   X-Real-IP         $remote_addr;
-                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   Host $host;
+                  proxy_set_header   X-Real-IP $remote_addr;
+                  proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
                   proxy_set_header   X-Forwarded-Proto $scheme;
-                  proxy_read_timeout 120s;
+                  proxy_read_timeout 60;
+                  proxy_connect_timeout 60;
               }
           }
 
@@ -318,22 +232,32 @@
         path: /etc/nginx/sites-enabled/default
         state: absent
 
+    - name: Test nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+
     - name: Enable and restart nginx
       ansible.builtin.systemd:
         name: nginx
         enabled: true
         state: restarted
 
-    # -------------------------------------------------------------------------
-    # Verify app is responding locally
-    # -------------------------------------------------------------------------
-    - name: Wait for app to become ready
-      ansible.builtin.command:
-        cmd: >
-          curl -Lsf -o /dev/null -w "%{http_code}"
-          http://127.0.0.1:8000/health/
+    #  Health check 
+
+    - name: Wait for app to be ready on port 8000
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8000
+        timeout: 60
+        state: started
+
+    - name: Verify health endpoint responds
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8000/health/
+        method: GET
+        status_code: [200, 301, 302, 307, 308]
+        timeout: 10
       register: health_result
-      retries: 12
-      delay: 10
-      until: health_result.stdout is defined and (health_result.stdout | string) is match("^[23]")
-      changed_when: false
+      retries: 5
+      delay: 5
+      until: health_result.status in [200, 301, 302, 307, 308]
