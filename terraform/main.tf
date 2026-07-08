@@ -148,6 +148,110 @@ resource "aws_security_group_rule" "app_ingress_from_alb" {
 }
 
 # ---------------------------------------------------------------------------
+# Security Group for VPC Endpoints
+# Allows HTTPS (443) from the app instance security group into the
+# interface endpoints so the SSM agent can communicate privately.
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "${var.project_name}-vpce-sg"
+  description = "Allow HTTPS from app instances to VPC endpoints"
+  vpc_id      = aws_default_vpc.main.id
+
+  ingress {
+    description     = "HTTPS from app SG"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-vpce-sg"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# VPC Interface Endpoints for SSM
+# These three endpoints are the minimum required for AWS Systems Manager
+# Session Manager to function without internet access:
+#   ssm          – control plane / agent registration
+#   ssmmessages  – Session Manager data channel
+#   ec2messages  – Run Command / Systems Manager messages
+# private_dns_enabled = true rewrites the public DNS names to the private
+# IPs so the SSM agent uses the endpoint automatically.
+# ---------------------------------------------------------------------------
+
+resource "aws_vpc_endpoint" "ssm" {
+  vpc_id              = aws_default_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_default_subnet.public[0].id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.project_name}-vpce-ssm"
+  }
+}
+
+resource "aws_vpc_endpoint" "ssmmessages" {
+  vpc_id              = aws_default_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_default_subnet.public[0].id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.project_name}-vpce-ssmmessages"
+  }
+}
+
+resource "aws_vpc_endpoint" "ec2messages" {
+  vpc_id              = aws_default_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_default_subnet.public[0].id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.project_name}-vpce-ec2messages"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# S3 Gateway Endpoint
+# Allows the instance and the Ansible aws_ssm connection plugin to reach
+# S3 (SSM session output bucket + apt package mirrors) without internet.
+# Gateway endpoints are free and work by adding a route to the VPC
+# route tables.
+# ---------------------------------------------------------------------------
+
+data "aws_route_tables" "default_vpc" {
+  vpc_id = aws_default_vpc.main.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_default_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = data.aws_route_tables.default_vpc.ids
+
+  tags = {
+    Name = "${var.project_name}-vpce-s3"
+  }
+}
+
+# ---------------------------------------------------------------------------
 # IAM Role for SSM
 # ---------------------------------------------------------------------------
 
@@ -247,11 +351,12 @@ resource "aws_key_pair" "app" {
 
 # ---------------------------------------------------------------------------
 # EC2 Instance
-# Placed in a default subnet (which has a route to the default VPC's IGW
-# for outbound traffic so SSM and apt can reach the internet).
-# associate_public_ip_address = false means no public IP is assigned, so
-# the instance is not directly reachable from the internet; Ansible
-# connects exclusively via AWS SSM Session Manager.
+# Placed in a default subnet with no public IP assigned – the instance is
+# not directly reachable from the internet.  Ansible connects exclusively
+# via AWS SSM Session Manager using the VPC interface endpoints above
+# (no NAT gateway or public IP required).
+# depends_on ensures the VPC endpoints are in place before the instance
+# boots so the SSM agent can register on its very first start.
 # ---------------------------------------------------------------------------
 
 resource "aws_instance" "app" {
@@ -270,6 +375,15 @@ resource "aws_instance" "app" {
     systemctl enable amazon-ssm-agent
     systemctl start amazon-ssm-agent
   EOF
+
+  # Ensure VPC endpoints exist before the instance boots so the SSM agent
+  # can register immediately on first start.
+  depends_on = [
+    aws_vpc_endpoint.ssm,
+    aws_vpc_endpoint.ssmmessages,
+    aws_vpc_endpoint.ec2messages,
+    aws_vpc_endpoint.s3,
+  ]
 
   tags = {
     Name    = "${var.project_name}-app"
