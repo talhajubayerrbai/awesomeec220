@@ -4,19 +4,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # test
-  # ---------------------------------------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -26,26 +24,28 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest --tb=short -q || true
+          if [ -d tests ]; then
+            pytest tests/ -v || true
+          else
+            echo "No tests directory found, skipping."
+          fi
 
-      - name: Lint (advisory only)
+      - name: Lint (advisory)
         run: |
           pip install flake8 || true
-          flake8 . --max-line-length=120 --extend-ignore=E501,W503 || true
+          flake8 app/ --max-line-length=120 || true
         continue-on-error: true
 
-  # ---------------------------------------------------------------------------
-  # provision  - Terraform only
-  # ---------------------------------------------------------------------------
   provision:
     name: Provision
     runs-on: ubuntu-latest
     needs: [test]
     outputs:
       instance_id: ${{ steps.tf_outputs.outputs.instance_id }}
-
+      ssm_bucket_name: ${{ steps.tf_outputs.outputs.ssm_bucket_name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -54,7 +54,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Set up Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.5"
@@ -76,22 +76,20 @@ jobs:
             -var="aws_region=${{ secrets.AWS_REGION }}" \
             -var="public_key=${{ secrets.SSH_PUBLIC_KEY }}"
 
-      - name: Capture Terraform outputs
+      - name: Capture Terraform Outputs
         id: tf_outputs
         working-directory: terraform
         run: |
           echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "ssm_bucket_name=$(terraform output -raw ssm_bucket_name)" >> "$GITHUB_OUTPUT"
 
-  # ---------------------------------------------------------------------------
-  # configure  - Ansible over AWS SSM
-  # ---------------------------------------------------------------------------
   configure:
     name: Configure
     runs-on: ubuntu-latest
     needs: [provision]
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -99,6 +97,12 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install Ansible and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible boto3 botocore
+          ansible-galaxy collection install community.aws amazon.aws
 
       - name: Write SSH private key
         run: |
@@ -106,82 +110,28 @@ jobs:
           printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Install Ansible and SSM plugin
-        run: |
-          python -m pip install --upgrade pip
-          pip install ansible boto3 botocore
-          # Install the community.aws collection (contains aws_ssm connection plugin)
-          ansible-galaxy collection install community.aws amazon.aws
-
-      - name: Install AWS Session Manager plugin
-        run: |
-          curl -sSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" \
-            -o /tmp/session-manager-plugin.deb
-          sudo dpkg -i /tmp/session-manager-plugin.deb
-
-      - name: Set up Terraform (to read outputs)
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.7.5"
-          terraform_wrapper: false
-
-      - name: Terraform Init (read outputs)
-        working-directory: terraform
-        run: |
-          terraform init -reconfigure \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="region=${{ secrets.AWS_REGION }}" \
-            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
-
-      - name: Get Terraform outputs
-        id: tf_out
-        working-directory: terraform
-        run: |
-          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
-          echo "ssm_bucket=$(terraform output -raw ssm_bucket)"   >> "$GITHUB_OUTPUT"
-
-      - name: Wait for SSM agent to register
-        run: |
-          INSTANCE_ID="${{ steps.tf_out.outputs.instance_id }}"
-          echo "Waiting for SSM registration of $INSTANCE_ID ..."
-          for i in $(seq 1 30); do
-            STATUS=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
-              --query "InstanceInformationList[0].PingStatus" \
-              --output text 2>/dev/null || echo "None")
-            echo "  attempt $i: $STATUS"
-            if [ "$STATUS" = "Online" ]; then
-              echo "Instance is Online."
-              break
-            fi
-            sleep 20
-          done
-
       - name: Run Ansible playbook
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+          SSM_BUCKET: ${{ needs.provision.outputs.ssm_bucket_name }}
         run: |
           ansible-playbook ansible/playbook.yml \
-            -i "${{ steps.tf_out.outputs.instance_id }}," \
-            -e "ansible_connection=community.aws.aws_ssm" \
-            -e "ansible_aws_ssm_bucket_name=${{ steps.tf_out.outputs.ssm_bucket }}" \
-            -e "ansible_aws_ssm_region=${{ secrets.AWS_REGION }}" \
-            -e "ansible_remote_tmp=/tmp/.ansible.tmp" \
-            -e "ansible_python_interpreter=/usr/bin/python3"
+            -i ansible/inventory.yml \
+            -e "target_instance_id=${INSTANCE_ID}" \
+            -e "ansible_aws_ssm_bucket_name=${SSM_BUCKET}" \
+            -e "aws_region=${{ secrets.AWS_REGION }}"
 
-  # ---------------------------------------------------------------------------
-  # verify  - hit the public ALB endpoint
-  # ---------------------------------------------------------------------------
   verify:
     name: Verify
     runs-on: ubuntu-latest
     needs: [configure]
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -190,7 +140,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Set up Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.5"
@@ -205,30 +155,25 @@ jobs:
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
 
       - name: Get ALB endpoint
-        id: endpoint
+        id: get_endpoint
         working-directory: terraform
         run: |
-          APP_URL=$(terraform output -raw app_url)
-          echo "app_url=${APP_URL}" >> "$GITHUB_OUTPUT"
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          echo "alb_dns=${ALB_DNS}" >> "$GITHUB_OUTPUT"
+          echo "app_url=http://${ALB_DNS}" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke test
+      - name: Wait for ALB and app to be ready
         run: |-
-          APP_URL="${{ steps.endpoint.outputs.app_url }}"
-          echo "Testing endpoint: ${APP_URL}"
-
-          # Allow extra time for the app to fully start
-          sleep 30
-
-          MAX=10
-          for i in $(seq 1 $MAX); do
-            STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${APP_URL}/health/" || echo "000")
-            echo "Attempt $i - HTTP $STATUS"
+          ALB_URL="${{ steps.get_endpoint.outputs.app_url }}"
+          echo "Probing: ${ALB_URL}/health/"
+          for i in $(seq 1 20); do
+            STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" "${ALB_URL}/health/" || echo "000")
+            echo "Attempt ${i}: HTTP ${STATUS}"
             if [[ "$STATUS" =~ ^[23] ]]; then
-              echo "SUCCESS: App is responding with HTTP $STATUS"
+              echo "App is healthy!"
               exit 0
             fi
             sleep 15
           done
-
-          echo "FAIL: App did not respond with 2xx/3xx after $MAX attempts"
+          echo "App did not become healthy in time"
           exit 1
