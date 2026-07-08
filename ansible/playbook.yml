@@ -1,0 +1,339 @@
+---
+- name: Configure Python FastAPI application
+  hosts: all
+  become: true
+
+  vars:
+    app_dir: /opt/app
+    venv_dir: /opt/app/.venv
+    app_user: ubuntu
+    app_port: 8000
+    ansible_remote_tmp: /tmp/.ansible.tmp
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # System packages
+    # -------------------------------------------------------------------------
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Python 3.12 and system dependencies
+      ansible.builtin.apt:
+        name:
+          - python3.12
+          - python3.12-venv
+          - python3.12-dev
+          - python3-pip
+          - build-essential
+          - curl
+          - git
+          - nginx
+        state: present
+
+    # -------------------------------------------------------------------------
+    # Application directory
+    # -------------------------------------------------------------------------
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # -------------------------------------------------------------------------
+    # Copy application files (using playbook_dir to resolve paths correctly)
+    # -------------------------------------------------------------------------
+    - name: Copy main.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../main.py"
+        dest: "{{ app_dir }}/main.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create app package directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}/app"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy app/__init__.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/__init__.py"
+        dest: "{{ app_dir }}/app/__init__.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy app/main.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/main.py"
+        dest: "{{ app_dir }}/app/main.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy app/config.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/config.py"
+        dest: "{{ app_dir }}/app/config.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create app/routers directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}/app/routers"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy app/routers/__init__.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/routers/__init__.py"
+        dest: "{{ app_dir }}/app/routers/__init__.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy app/routers/health.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/routers/health.py"
+        dest: "{{ app_dir }}/app/routers/health.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy app/routers/api.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/routers/api.py"
+        dest: "{{ app_dir }}/app/routers/api.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create app/models directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}/app/models"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy app/models/__init__.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/models/__init__.py"
+        dest: "{{ app_dir }}/app/models/__init__.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create app/schemas directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}/app/schemas"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy app/schemas/__init__.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../app/schemas/__init__.py"
+        dest: "{{ app_dir }}/app/schemas/__init__.py"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Check if public/ directory exists locally
+      ansible.builtin.set_fact:
+        public_dir_files: "{{ lookup('fileglob', playbook_dir + '/../public/*', wantlist=True) }}"
+
+    - name: Create public/ directory on remote if source exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}/public"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: public_dir_files | length > 0
+
+    - name: Copy public/ directory contents
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../public/"
+        dest: "{{ app_dir }}/public/"
+        owner: root
+        group: root
+        mode: "0644"
+      when: public_dir_files | length > 0
+
+    # -------------------------------------------------------------------------
+    # requirements.txt - copy if present, otherwise create minimal one
+    # -------------------------------------------------------------------------
+    - name: Check if requirements.txt exists locally
+      ansible.builtin.set_fact:
+        req_files: "{{ lookup('fileglob', playbook_dir + '/../requirements.txt', wantlist=True) }}"
+
+    - name: Copy requirements.txt if present
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../requirements.txt"
+        dest: "{{ app_dir }}/requirements.txt"
+        owner: root
+        group: root
+        mode: "0644"
+      when: req_files | length > 0
+
+    - name: Write minimal requirements.txt if not present
+      ansible.builtin.shell: |
+        cat > {{ app_dir }}/requirements.txt << 'EOF'
+        fastapi>=0.110.0
+        uvicorn[standard]>=0.29.0
+        gunicorn>=21.2.0
+        python-multipart>=0.0.9
+        aiofiles>=23.0.0
+        EOF
+      args:
+        creates: "{{ app_dir }}/requirements.txt"
+      when: req_files | length == 0
+
+    # -------------------------------------------------------------------------
+    # Python virtual environment (created as root, ownership fixed after)
+    # -------------------------------------------------------------------------
+    - name: Create Python virtual environment using python3.12
+      ansible.builtin.command:
+        cmd: python3.12 -m venv "{{ venv_dir }}"
+        creates: "{{ venv_dir }}/bin/python"
+
+    - name: Upgrade pip inside venv
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/pip install --upgrade pip"
+
+    - name: Install Python requirements
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/pip install -r {{ app_dir }}/requirements.txt"
+
+    - name: Set ownership of app directory to ubuntu
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
+
+    # -------------------------------------------------------------------------
+    # Environment file
+    # -------------------------------------------------------------------------
+    - name: Write environment file
+      ansible.builtin.shell: |
+        cat > /etc/app.env << 'EOF'
+        APP_ENV=production
+        PORT=8000
+        HOST=0.0.0.0
+        EOF
+        chmod 644 /etc/app.env
+
+    # -------------------------------------------------------------------------
+    # Systemd service
+    # -------------------------------------------------------------------------
+    - name: Write systemd service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/app.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=FastAPI Application (gunicorn)
+          After=network.target
+
+          [Service]
+          Type=notify
+          User={{ app_user }}
+          Group={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          EnvironmentFile=/etc/app.env
+          ExecStart={{ venv_dir }}/bin/gunicorn app.main:app \
+              -k uvicorn.workers.UvicornWorker \
+              -w 4 \
+              -b 0.0.0.0:{{ app_port }} \
+              --timeout 120 \
+              --access-logfile - \
+              --error-logfile -
+          Restart=always
+          RestartSec=5
+          KillMode=mixed
+          TimeoutStopSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start app service
+      ansible.builtin.systemd:
+        name: app
+        enabled: true
+        state: restarted
+
+    # -------------------------------------------------------------------------
+    # Nginx reverse proxy: port 80 -> 127.0.0.1:8000
+    # -------------------------------------------------------------------------
+    - name: Write nginx site config
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/app
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 120s;
+              }
+          }
+
+    - name: Enable nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Enable and restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: restarted
+
+    # -------------------------------------------------------------------------
+    # Verify app is responding locally
+    # -------------------------------------------------------------------------
+    - name: Wait for app to become ready
+      ansible.builtin.command:
+        cmd: >
+          curl -Lsf -o /dev/null -w "%{http_code}"
+          http://127.0.0.1:8000/health/
+      register: health_result
+      retries: 12
+      delay: 10
+      until: health_result.stdout is defined and (health_result.stdout | string) is match("^[23]")
+      changed_when: false
