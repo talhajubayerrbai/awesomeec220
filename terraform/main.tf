@@ -53,133 +53,41 @@ provider "aws" {
 }
 
 # ---------------------------------------------------------------------------
-# VPC
+# VPC  – adopt the account's default VPC instead of creating a new one.
+# aws_default_vpc manages an EXISTING resource; it never creates a new VPC
+# and therefore does not count against the 5-VPC-per-region quota.
 # ---------------------------------------------------------------------------
 
-resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
+resource "aws_default_vpc" "main" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
   tags = {
-    Name = "${var.project_name}-vpc"
+    Name = "${var.project_name}-default-vpc"
   }
 }
 
 # ---------------------------------------------------------------------------
-# Public Subnets (two AZs)
+# Availability zones
 # ---------------------------------------------------------------------------
 
-resource "aws_subnet" "public" {
-  count                   = 2
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = count.index == 0 ? "10.0.1.0/24" : "10.0.3.0/24"
-  availability_zone       = count.index == 0 ? "${var.aws_region}a" : "${var.aws_region}b"
-  map_public_ip_on_launch = true
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# ---------------------------------------------------------------------------
+# Public Subnets – adopt the default VPC's existing default subnets.
+# aws_default_subnet never creates a new subnet; it manages the one that
+# already exists in the given AZ inside the default VPC.
+# ---------------------------------------------------------------------------
+
+resource "aws_default_subnet" "public" {
+  count             = 2
+  availability_zone = data.aws_availability_zones.available.names[count.index]
 
   tags = {
     Name = "${var.project_name}-public-${count.index}"
   }
-}
-
-# ---------------------------------------------------------------------------
-# Private Subnet
-# ---------------------------------------------------------------------------
-
-resource "aws_subnet" "private" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "${var.aws_region}a"
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name = "${var.project_name}-private"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Internet Gateway
-# ---------------------------------------------------------------------------
-
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "${var.project_name}-igw"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Public Route Table
-# ---------------------------------------------------------------------------
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = {
-    Name = "${var.project_name}-public-rt"
-  }
-}
-
-resource "aws_route_table_association" "public_0" {
-  subnet_id      = aws_subnet.public[0].id
-  route_table_id = aws_route_table.public.id
-}
-
-resource "aws_route_table_association" "public_1" {
-  subnet_id      = aws_subnet.public[1].id
-  route_table_id = aws_route_table.public.id
-}
-
-# ---------------------------------------------------------------------------
-# NAT Gateway (EIP in public subnet)
-# ---------------------------------------------------------------------------
-
-resource "aws_eip" "nat" {
-  domain     = "vpc"
-  depends_on = [aws_internet_gateway.main]
-
-  tags = {
-    Name = "${var.project_name}-nat-eip"
-  }
-}
-
-resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-
-  tags = {
-    Name = "${var.project_name}-nat-gw"
-  }
-
-  depends_on = [aws_internet_gateway.main]
-}
-
-# ---------------------------------------------------------------------------
-# Private Route Table
-# ---------------------------------------------------------------------------
-
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
-  }
-
-  tags = {
-    Name = "${var.project_name}-private-rt"
-  }
-}
-
-resource "aws_route_table_association" "private" {
-  subnet_id      = aws_subnet.private.id
-  route_table_id = aws_route_table.private.id
 }
 
 # ---------------------------------------------------------------------------
@@ -189,7 +97,7 @@ resource "aws_route_table_association" "private" {
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
   description = "Allow HTTP inbound to ALB"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_default_vpc.main.id
 
   ingress {
     description = "HTTP from anywhere"
@@ -214,7 +122,7 @@ resource "aws_security_group" "alb" {
 resource "aws_security_group" "app" {
   name        = "${var.project_name}-app-sg"
   description = "Allow traffic from ALB to app"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_default_vpc.main.id
 
   egress {
     from_port   = 0
@@ -338,13 +246,18 @@ resource "aws_key_pair" "app" {
 }
 
 # ---------------------------------------------------------------------------
-# EC2 Instance (private subnet)
+# EC2 Instance
+# Placed in a default subnet (which has a route to the default VPC's IGW
+# for outbound traffic so SSM and apt can reach the internet).
+# associate_public_ip_address = false means no public IP is assigned, so
+# the instance is not directly reachable from the internet; Ansible
+# connects exclusively via AWS SSM Session Manager.
 # ---------------------------------------------------------------------------
 
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.private.id
+  subnet_id                   = aws_default_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.app.id]
   iam_instance_profile        = aws_iam_instance_profile.ssm.name
   key_name                    = aws_key_pair.app.key_name
@@ -373,7 +286,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.public[0].id, aws_subnet.public[1].id]
+  subnets            = [aws_default_subnet.public[0].id, aws_default_subnet.public[1].id]
 
   tags = {
     Name = "${var.project_name}-alb"
@@ -384,7 +297,7 @@ resource "aws_lb_target_group" "app" {
   name        = "${var.project_name}-tg"
   port        = 8000
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = aws_default_vpc.main.id
   target_type = "instance"
 
   health_check {
