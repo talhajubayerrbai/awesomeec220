@@ -117,12 +117,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
           INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
-          SSM_BUCKET: ${{ needs.provision.outputs.ssm_bucket_name }}
+          # Derive bucket name from the deterministic naming convention used in
+          # terraform/main.tf ("${project_name}-ssm-tf") to avoid the GitHub
+          # Actions secret-masking that silently suppresses the ssm_bucket_name
+          # output when PROJECT_NAME appears in its value.
+          SSM_BUCKET: ${{ secrets.PROJECT_NAME }}-ssm-tf
         run: |
+          # Pass the instance ID as an inline inventory entry ("-i ID,") so
+          # Ansible can resolve it as a host. The YAML inventory supplies the
+          # SSM connection group-vars for app_servers; we also pass connection
+          # vars as extra-vars for safety.
           ansible-playbook ansible/playbook.yml \
+            -i "${INSTANCE_ID}," \
             -i ansible/inventory.yml \
             -e "target_instance_id=${INSTANCE_ID}" \
             -e "ansible_aws_ssm_bucket_name=${SSM_BUCKET}" \
+            -e "ansible_aws_ssm_region=${{ secrets.AWS_REGION }}" \
+            -e "ansible_connection=community.aws.aws_ssm" \
             -e "aws_region=${{ secrets.AWS_REGION }}"
 
   verify:
